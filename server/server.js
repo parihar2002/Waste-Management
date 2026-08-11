@@ -7,6 +7,14 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 const dotenv = require('dotenv');
+const dns = require('dns');
+
+// Configure custom DNS servers to resolve MongoDB Atlas SRV records successfully
+try {
+  dns.setServers(['8.8.8.8', '8.8.4.4', '1.1.1.1']);
+} catch (dnsError) {
+  console.warn('[DNS WARNING] Could not set custom DNS servers:', dnsError.message);
+}
 
 // Load environment variables
 dotenv.config();
@@ -15,12 +23,23 @@ dotenv.config();
 const app = express();
 const server = http.createServer(app);
 
+// Setup CORS options with local development and production URLs
+const frontendUrl = process.env.FRONTEND_URL ? process.env.FRONTEND_URL.replace(/\/$/, '') : null;
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://localhost:5173',
+  frontendUrl
+].filter(Boolean);
+
+const corsOptions = {
+  origin: allowedOrigins.length > 0 ? allowedOrigins : '*',
+  methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+  credentials: true
+};
+
 // Integrate Socket.io with customizable CORS
 const io = socketIo(server, {
-  cors: {
-    origin: '*', // Production should restrict this to specific domain
-    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE']
-  }
+  cors: corsOptions
 });
 
 // Store Socket.io reference globally in Express app to query in controllers
@@ -30,7 +49,7 @@ app.set('socketio', io);
 app.use(helmet({
   contentSecurityPolicy: false // Allows loading external Leaflet map tiles
 }));
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '10mb' })); // Support base64 image uploads
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(morgan('dev'));

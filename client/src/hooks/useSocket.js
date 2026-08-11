@@ -18,8 +18,9 @@ export const useSocket = () => {
       return;
     }
 
-    // Connect to Socket server (Vite proxy routes this correctly)
-    const socket = io('/', {
+    // Connect to Socket server (uses VITE_SOCKET_URL if defined, otherwise falls back to relative path for Vite proxy)
+    const socketUrl = import.meta.env.VITE_SOCKET_URL || '/';
+    const socket = io(socketUrl, {
       transports: ['websocket', 'polling']
     });
     socketRef.current = socket;

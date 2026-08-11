@@ -1,8 +1,16 @@
 {
-    "rewrites": [
-        {
-            "source" : "/(.*)",
-            "destination" : "./index/html"
-        }
-    ]
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://waste-management-v34t.vercel.app/api/:path*"
+    },
+    {
+      "source": "/socket.io/:path*",
+      "destination": "https://waste-management-v34t.vercel.app/socket.io/:path*"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
 }
