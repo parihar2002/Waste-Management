@@ -1,8 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MapPin, Upload, CheckCircle2, AlertCircle } from 'lucide-react';
-import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
+import { MapPin, Upload, CheckCircle2, AlertCircle, AlertTriangle, Locate, Loader2 } from 'lucide-react';
+import { MapContainer, TileLayer, Marker, useMapEvents, useMap } from 'react-leaflet';
 import L from 'leaflet';
+
+// Fix Leaflet default marker icon paths (well-known bundler issue)
+// https://github.com/Leaflet/Leaflet/issues/4968
+delete L.Icon.Default.prototype._getIconUrl;
+L.Icon.Default.mergeOptions({
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+});
 
 // Setup Map events to pick coords click on map
 function MapEventsHandler({ onMapClick }) {
@@ -14,8 +23,20 @@ function MapEventsHandler({ onMapClick }) {
   return null;
 }
 
+// Recenter the map smoothly when coordinates change
+function RecenterMap({ lat, lng }) {
+  const map = useMap();
+  useEffect(() => {
+    if (lat && lng) {
+      map.flyTo([lat, lng], map.getZoom(), { duration: 0.8 });
+    }
+  }, [lat, lng, map]);
+  return null;
+}
+
 export default function PickupRequestForm() {
   const navigate = useNavigate();
+  const errorRef = useRef(null);
 
   const [wasteType, setWasteType] = useState('mixed');
   const [urgency, setUrgency] = useState('medium');
@@ -31,12 +52,37 @@ export default function PickupRequestForm() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsStatus, setGpsStatus] = useState('idle'); // idle | detecting | detected | failed
+  const [warning, setWarning] = useState(''); // Non-blocking warning (amber)
 
-  // Handle image selector
+  // Auto-scroll to error/warning when they appear
+  useEffect(() => {
+    if ((error || warning) && errorRef.current) {
+      errorRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [error, warning]);
+
+  // Auto-detect GPS on mount
+  useEffect(() => {
+    fetchCurrentLocation();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Handle image selector with 5MB validation
   const handleImageChange = (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    // Validate file size (5MB = 5 * 1024 * 1024 bytes)
+    const MAX_SIZE = 5 * 1024 * 1024;
+    if (file.size > MAX_SIZE) {
+      setError(`Image file is too large (${(file.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed size is 5MB.`);
+      e.target.value = ''; // Reset input
+      return;
+    }
+
+    setError('');
     setImageFile(file);
 
     const reader = new FileReader();
@@ -49,11 +95,12 @@ export default function PickupRequestForm() {
   const handleMapClick = (lat, lng) => {
     setLatitude(parseFloat(lat.toFixed(6)));
     setLongitude(parseFloat(lng.toFixed(6)));
-    setAddress(`Coordinates: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+    setAddress(`📍 Pinned Location: ${lat.toFixed(4)}, ${lng.toFixed(4)}`);
+    setWarning('');
   };
 
   // Client-side Haversine helper to calculate distance in km
-  const getDistance = (lat1, lon1, lat2, lon2) => {
+  const getDistance = useCallback((lat1, lon1, lat2, lon2) => {
     const R = 6371; // Earth's radius in km
     const dLat = ((lat2 - lat1) * Math.PI) / 180;
     const dLon = ((lon2 - lon1) * Math.PI) / 180;
@@ -65,7 +112,7 @@ export default function PickupRequestForm() {
         Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
-  };
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -81,6 +128,7 @@ export default function PickupRequestForm() {
 
     setLoading(true);
     setError('');
+    setWarning('');
     setSuccess('');
 
     // Native GPS verification logic
@@ -95,11 +143,11 @@ export default function PickupRequestForm() {
         const actualLat = position.coords.latitude;
         const actualLon = position.coords.longitude;
 
-        // Verify if selected coordinates are within 10m of device actual GPS (0.01 km)
+        // Verify if selected coordinates are within 200m of device actual GPS (0.2 km)
         const dist = getDistance(actualLat, actualLon, latitude, longitude);
 
-        if (dist > 0.01) { // 10 meters operating radius limit
-          setError(`You can only schedule pickup requests at your current physical location. Your pinned map coordinates are ${(dist * 1000).toFixed(0)}m away from your GPS location (Limit: 10m).`);
+        if (dist > 0.2) { // 200 meters operating radius limit
+          setError(`Your map pin is ${(dist * 1000).toFixed(0)}m away from your current GPS location. Please pin a location within 200m of where you are, or tap "Use My GPS" to snap to your position.`);
           setLoading(false);
           return;
         }
@@ -133,40 +181,71 @@ export default function PickupRequestForm() {
 
           setLoading(false);
           if (data.success) {
-            setSuccess('Smart pickup scheduled! Points will credit on completion.');
+            setSuccess('🎉 Smart pickup scheduled! Points will credit on completion.');
             setTimeout(() => navigate('/citizen-dashboard'), 1500);
           } else {
             setError(data.message || 'Submission error');
           }
         } catch (err) {
           setLoading(false);
-          setError('Failed to contact server api.');
+          setError('Failed to contact server. Please check your internet connection and try again.');
         }
       },
       (err) => {
         setLoading(false);
-        setError(`Location verification failed: ${err.message}. Please enable GPS location permissions to schedule a pickup.`);
+        if (err.code === err.PERMISSION_DENIED) {
+          setError('Location permission denied. Please allow GPS access in your browser settings to schedule a pickup.');
+        } else if (err.code === err.TIMEOUT) {
+          setError('GPS location timed out. Please ensure you have a clear signal and try again.');
+        } else {
+          setError(`Location verification failed: ${err.message}. Please enable GPS location permissions to schedule a pickup.`);
+        }
       },
-      { enableHighAccuracy: true, timeout: 8000 }
+      { enableHighAccuracy: true, timeout: 10000 }
     );
   };
 
   // Get current lat lon of device
   const fetchCurrentLocation = () => {
-    if (navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          const lat = parseFloat(pos.coords.latitude.toFixed(6));
-          const lon = parseFloat(pos.coords.longitude.toFixed(6));
-          setLatitude(lat);
-          setLongitude(lon);
-          setAddress(`Current Location: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
-        },
-        (err) => {
-          console.error(err);
-        }
-      );
+    if (!navigator.geolocation) {
+      setGpsStatus('failed');
+      return;
     }
+
+    setGpsLoading(true);
+    setGpsStatus('detecting');
+
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const lat = parseFloat(pos.coords.latitude.toFixed(6));
+        const lon = parseFloat(pos.coords.longitude.toFixed(6));
+        setLatitude(lat);
+        setLongitude(lon);
+        setAddress(`📍 GPS Location: ${lat.toFixed(4)}, ${lon.toFixed(4)}`);
+        setGpsLoading(false);
+        setGpsStatus('detected');
+        setWarning('');
+        setError('');
+      },
+      (err) => {
+        console.error(err);
+        setGpsLoading(false);
+        setGpsStatus('failed');
+        if (err.code === err.PERMISSION_DENIED) {
+          setWarning('GPS access denied. You can still manually set your location on the map.');
+        } else {
+          setWarning('Could not detect GPS location. You can manually set your location by clicking the map.');
+        }
+      },
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+
+  // Quick snap to GPS (one-click fix from warning)
+  const snapToGPS = () => {
+    setError('');
+    setWarning('');
+    fetchCurrentLocation();
   };
 
   const isDark = document.documentElement.classList.contains('dark');
@@ -184,10 +263,43 @@ export default function PickupRequestForm() {
         <p className="text-xs text-slate-400 font-medium">Pin collection locations, upload images of garbage, and earn coins</p>
       </div>
 
+      {/* GPS Status Indicator */}
+      {gpsLoading && (
+        <div className="p-3 bg-blue-50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-800 text-blue-600 dark:text-blue-400 text-xs rounded-xl flex items-center gap-2 font-medium animate-pulse">
+          <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+          <span>Detecting your GPS location...</span>
+        </div>
+      )}
+
+      {/* Warning banner (amber — non-blocking) */}
+      {warning && !gpsLoading && (
+        <div ref={errorRef} className="p-3 bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-xs rounded-xl flex items-center gap-2 font-medium">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span className="flex-1">{warning}</span>
+          <button 
+            type="button"
+            onClick={snapToGPS}
+            className="shrink-0 ml-2 px-2.5 py-1 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-[10px] font-bold transition-all"
+          >
+            Retry GPS
+          </button>
+        </div>
+      )}
+
+      {/* Error banner (red — blocking) */}
       {error && (
-        <div className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 text-xs rounded-xl flex items-center gap-2 font-medium">
+        <div ref={errorRef} className="p-3 bg-red-50 dark:bg-red-950/20 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 text-xs rounded-xl flex items-center gap-2 font-medium">
           <AlertCircle className="h-4 w-4 shrink-0" />
-          <span>{error}</span>
+          <span className="flex-1">{error}</span>
+          {error.includes('map pin') && (
+            <button 
+              type="button"
+              onClick={snapToGPS}
+              className="shrink-0 ml-2 px-2.5 py-1 bg-eco-600 hover:bg-eco-500 text-white rounded-lg text-[10px] font-bold transition-all"
+            >
+              📍 Use My GPS
+            </button>
+          )}
         </div>
       )}
 
@@ -215,8 +327,8 @@ export default function PickupRequestForm() {
                 <option value="organic">Organic Waste (🍎)</option>
                 <option value="plastic">Plastic Content (🥤)</option>
                 <option value="electronic">Electronic/Battery (💻)</option>
-                <option value="metal">tin/Aluminum (🥫)</option>
-                <option value="medical">clinical Syringes (💉)</option>
+                <option value="metal">Tin/Aluminum (🥫)</option>
+                <option value="medical">Clinical Syringes (💉)</option>
                 <option value="mixed">Mixed Garbage (🗑️)</option>
               </select>
             </div>
@@ -259,9 +371,20 @@ export default function PickupRequestForm() {
               <button 
                 type="button"
                 onClick={fetchCurrentLocation}
-                className="text-[9px] font-bold text-eco-600 hover:underline dark:text-eco-400"
+                disabled={gpsLoading}
+                className="text-[9px] font-bold text-eco-600 hover:underline dark:text-eco-400 flex items-center gap-1 disabled:opacity-50"
               >
-                GPS Auto-Detect
+                {gpsLoading ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Detecting...
+                  </>
+                ) : (
+                  <>
+                    <Locate className="h-3 w-3" />
+                    GPS Auto-Detect
+                  </>
+                )}
               </button>
             </div>
             <input 
@@ -330,7 +453,10 @@ export default function PickupRequestForm() {
             className="w-full py-3 mt-2 rounded-xl bg-eco-600 hover:bg-eco-500 font-semibold text-white shadow-lg text-xs transition-all flex items-center justify-center gap-2 disabled:bg-slate-300 dark:disabled:bg-slate-800"
           >
             {loading ? (
-              <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+              <>
+                <span className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
+                <span>Verifying location...</span>
+              </>
             ) : 'Dispatch Pickup Request'}
           </button>
         </div>
@@ -342,15 +468,39 @@ export default function PickupRequestForm() {
           <div className="h-64 rounded-3xl overflow-hidden border border-slate-100 dark:border-slate-800 shadow-sm relative z-10">
             <MapContainer
               center={[latitude, longitude]}
-              zoom={13}
+              zoom={15}
               style={{ width: '100%', height: '100%' }}
             >
               <TileLayer url={tileUrl} />
               <MapEventsHandler onMapClick={handleMapClick} />
+              <RecenterMap lat={latitude} lng={longitude} />
               <Marker position={[latitude, longitude]} />
             </MapContainer>
+
+            {/* GPS status badge on map */}
+            <div className="absolute top-2 right-2 z-20">
+              {gpsStatus === 'detected' && (
+                <div className="bg-eco-600/90 backdrop-blur-md px-2 py-1 rounded-lg text-[8px] text-white font-bold flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 bg-green-300 rounded-full animate-pulse"></span>
+                  GPS Active
+                </div>
+              )}
+              {gpsStatus === 'failed' && (
+                <div className="bg-amber-600/90 backdrop-blur-md px-2 py-1 rounded-lg text-[8px] text-white font-bold flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 bg-amber-300 rounded-full"></span>
+                  Manual Mode
+                </div>
+              )}
+              {gpsStatus === 'detecting' && (
+                <div className="bg-blue-600/90 backdrop-blur-md px-2 py-1 rounded-lg text-[8px] text-white font-bold flex items-center gap-1">
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                  Detecting...
+                </div>
+              )}
+            </div>
+
             <div className="absolute bottom-2 left-2 bg-black/60 backdrop-blur-md px-2.5 py-1.5 rounded-xl z-20 text-[9px] text-white">
-              📍 Click map coordinates to set pins
+              📍 Click map to set pickup pin
             </div>
           </div>
 
